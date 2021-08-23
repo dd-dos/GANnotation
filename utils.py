@@ -2,6 +2,7 @@ import os
 import sys
 import time
 import ipdb
+from sympy.core.numbers import I
 import torch
 import math
 import numpy as np
@@ -9,6 +10,7 @@ import cv2
 import matplotlib.pyplot as plt
 from PIL import Image
 import numba
+import scipy.io as sio
 
 def process_image(image,points,angle=0, flip=False, sigma=1,size=128, tight=16):
     if angle > 0:
@@ -97,35 +99,8 @@ def generate_maps(points, sigma, size=256):
     return maps 
 
 
-def crop( image, landmarks , size, tight=8):
-    delta_x = np.max(landmarks[:,0]) - np.min(landmarks[:,0])
-    delta_y = np.max(landmarks[:,1]) - np.min(landmarks[:,1])
-    delta = 0.5*(delta_x + delta_y)
-    if delta < 20:
-        tight_aux = 8
-    else:
-        tight_aux = int(tight * delta/100)
-    pts_ = landmarks.copy()
-    w = image.shape[1]
-    h = image.shape[0]
-    min_x = int(np.maximum( np.round( np.min(landmarks[:,0]) ) - tight_aux , 0 ))
-    min_y = int(np.maximum( np.round( np.min(landmarks[:,1]) ) - tight_aux , 0 ))
-    max_x = int(np.minimum( np.round( np.max(landmarks[:,0]) ) + tight_aux , w-1 ))
-    max_y = int(np.minimum( np.round( np.max(landmarks[:,1]) ) + tight_aux , h-1 ))
-    image = image[min_y:max_y,min_x:max_x,:]
-    pts_[:,0] = pts_[:,0] - min_x
-    pts_[:,1] = pts_[:,1] - min_y
-    sw = size/image.shape[1]
-    sh = size/image.shape[0]
-    im = cv2.resize(image, dsize=(size,size),
-                    interpolation=cv2.INTER_LINEAR)
-    
-    pts_[:,0] = pts_[:,0]*sw
-    pts_[:,1] = pts_[:,1]*sh
-    return im, pts_
-
 @numba.njit()
-def reduced_crop(image, landmarks , size, tight=8):
+def reduced_crop(image, landmarks, pts_3d, size, tight=8):
     delta_x = np.max(landmarks[:,0]) - np.min(landmarks[:,0])
     delta_y = np.max(landmarks[:,1]) - np.min(landmarks[:,1])
     delta = 0.5*(delta_x + delta_y)
@@ -133,7 +108,7 @@ def reduced_crop(image, landmarks , size, tight=8):
         tight_aux = 8
     else:
         tight_aux = int(tight * delta/100)
-    pts_ = landmarks
+    pts_2d = landmarks
     w = image.shape[1]
     h = image.shape[0]
     min_x = int(np.maximum( np.round( np.min(landmarks[:,0]) ) - tight_aux , 0 ))
@@ -141,14 +116,22 @@ def reduced_crop(image, landmarks , size, tight=8):
     max_x = int(np.minimum( np.round( np.max(landmarks[:,0]) ) + tight_aux , w-1 ))
     max_y = int(np.minimum( np.round( np.max(landmarks[:,1]) ) + tight_aux , h-1 ))
     image = image[min_y:max_y,min_x:max_x,:]
-    pts_[:,0] = pts_[:,0] - min_x
-    pts_[:,1] = pts_[:,1] - min_y
+    pts_2d[:,0] = pts_2d[:,0] - min_x
+    pts_2d[:,1] = pts_2d[:,1] - min_y
+
+    pts_3d[:,0] = pts_3d[:,0] - min_x
+    pts_3d[:,1] = pts_3d[:,1] - min_y
+    
     sw = size/image.shape[1]
     sh = size/image.shape[0]
     
-    pts_[:,0] = pts_[:,0]*sw
-    pts_[:,1] = pts_[:,1]*sh
-    return pts_
+    pts_2d[:,0] = pts_2d[:,0]*sw
+    pts_2d[:,1] = pts_2d[:,1]*sh
+
+    pts_3d[:,0] = pts_3d[:,0]*sw
+    pts_3d[:,1] = pts_3d[:,1]*sh
+    
+    return pts_2d, pts_3d
 
 
 def generate_Ginput( img, target_pts , sigma , size=256 ):
@@ -261,7 +244,12 @@ def show_vertices(vertices: np.ndarray, v_type='3D'):
 
 
 def read_pts(filename):
-    return np.loadtxt(filename, comments=("version:", "n_points:", "{", "}"))
+    if filename.endswith('.mat'):
+        return sio.loadmat(filename)
+    elif filename.endswith('pts'):
+        return np.loadtxt(filename, comments=("version:", "n_points:", "{", "}"))
+    else:
+        raise Exception('Unsupported file format')
 
 
 @numba.njit()
@@ -334,6 +322,37 @@ def close_eyes_68(pts):
     pts[38] = pts[40]
     pts[43] = pts[47]
     pts[44] = pts[46]
+
+    return pts
+
+import sympy
+def open_eyes_68(pts):
+    # pts[37] = pts[41] = (pts[37]+pts[41]) / 2
+    # pts[38] = pts[40] = (pts[38]+pts[40]) / 2
+    # pts[43] = pts[47] = (pts[43]+pts[47]) / 2
+    # pts[44] = pts[46] = (pts[44]+pts[46]) / 2
+
+    # pt37 = sympy.Point(pts[37])
+    # pt38 = sympy.Point(pts[38])
+    # pt43 = sympy.Point(pts[43])
+    # pt44 = sympy.Point(pts[44])
+    pt41 = sympy.Point(pts[41])
+    pt40 = sympy.Point(pts[40])
+    pt47 = sympy.Point(pts[47])
+    pt46 = sympy.Point(pts[46])
+
+    pt36 = sympy.Point(pts[36])
+    pt39 = sympy.Point(pts[39])
+    pt42 = sympy.Point(pts[42])
+    pt45 = sympy.Point(pts[45])
+
+    axis_left = sympy.geometry.Line(pt42, pt45)
+    axis_right = sympy.geometry.Line(pt36, pt39)
+    
+    pts[37] = np.array(pt41.reflect(axis_right)).astype(np.float32)
+    pts[38] = np.array(pt40.reflect(axis_right)).astype(np.float32)
+    pts[43] = np.array(pt47.reflect(axis_left)).astype(np.float32)
+    pts[44] = np.array(pt46.reflect(axis_left)).astype(np.float32)
 
     return pts
 

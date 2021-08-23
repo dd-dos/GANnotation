@@ -1,17 +1,45 @@
+import logging
 import GANnotation
 from PIL import Image
+from pathlib import Path
+import glob
+import numpy as np
+import tqdm
 
-img_list = ['test_images/300VW_Dataset_2015_12_14/001/image/000001.jpg']
-pts_list = ['test_images/300VW_Dataset_2015_12_14/001/annot/000001.pts']
+# img_list = ['test_images/300VW_Dataset_2015_12_14/001/image/000001.jpg']
+# pts_list = ['test_images/300VW_Dataset_2015_12_14/001/annot/000001.pts']
 
-model = GANnotation.GANnotation(path_to_model='models/myGEN.pth', enable_cuda=False)
-import time
-t0 = time.time()
-res = model.gen_close_eyes_batch(img_list, pts_list, batch_size=16)
-print(time.time()-t0)
-import cv2
-img = cv2.resize(res[0], (256,256))
-img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
-cv2.imshow('',img)
-cv2.waitKey(0)
-cv2.destroyAllWindows()
+logging.info('=> Read data path...')
+pts_list = np.array(list(Path('../300VW-3D_cropped').glob('**/*.mat'))).astype(str)
+img_list = [pts_list[i].replace('mat', 'jpg') for i in range(len(pts_list))]
+logging.info('=> Done reading.')
+
+sub_pts_list = [pts_list[i] for i in range(len(pts_list)) if i%5==0][:3]
+sub_img_list = [img_list[i] for i in range(len(img_list)) if i%5==0][:3]
+
+assert len(sub_pts_list) == len(sub_img_list)
+
+model = GANnotation.GANnotation(path_to_model='models/myGEN.pth', enable_cuda=True)
+
+split_size=1000
+div_batch = len(sub_pts_list) // split_size
+mod_batch = len(sub_pts_list) % split_size
+
+import shutil
+shutil.rmtree('300VW-3D_cropped_non_closed_eyes_foo', ignore_errors=True)
+for idx in tqdm.tqdm(range(div_batch)):
+    model.gen_close_eyes_batch(
+        sub_img_list[idx*split_size:(idx+1)*split_size], 
+        sub_pts_list[idx*split_size:(idx+1)*split_size], 
+        batch_size=64, 
+        closed_eyes=True,
+        out_dir='300VW-3D_cropped_non_closed_eyes_foo'
+    )
+if mod_batch > 0:
+    model.gen_close_eyes_batch(
+        sub_img_list[-mod_batch:], 
+        sub_pts_list[-mod_batch:], 
+        batch_size=64, 
+        closed_eyes=True,
+        out_dir='300VW-3D_cropped_non_closed_eyes_foo'
+    )

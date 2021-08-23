@@ -1,4 +1,5 @@
 import cv2
+from cv2 import data
 from numpy.lib.arraysetops import isin
 from numpy.lib.function_base import extract
 import torch
@@ -7,7 +8,6 @@ import scipy.io as sio
 import os
 from model import Generator
 import utils
-from p_tqdm import p_map
 import multiprocessing as mp
 import tqdm
 import logging
@@ -63,27 +63,47 @@ class GANnotation:
                 images.append(imout)
         return images, cropped_points
     
-    def _preprocess_single(self, item):
-        img, pts = item
+    def _preprocess_closed_eyes_single(self, item):
+        img, pts_2d, pts_3d = item
 
-        pts = utils.close_eyes_68(pts)
-        pts = utils.extract_66_from_68(pts)
+        pts_2d = utils.close_eyes_68(pts_2d)
+        pts_2d = utils.extract_66_from_68(pts_2d)
 
-        img, pts = utils.crop_face_landmarks(img, pts)
-        img, pts = utils.resize_face_landmarks(img, pts, (128, 128))
+        # img, pts = utils.crop_face_landmarks(img, pts)
+        # img, pts = utils.resize_face_landmarks(img, pts, (128, 128))
 
         img = (img/255.).transpose(2,0,1).astype(float)
 
-        frame_w = int(np.floor(2*pts.max()))
+        frame_w = int(np.floor(2*pts_2d.max()))
         frame = np.zeros((frame_w,frame_w,3))
-        pts = utils.reduced_crop(frame, pts, size=128, tight=16 )
+        pts_2d, pts_3d = utils.reduced_crop(frame, pts_2d, pts_3d, size=128, tight=16)
 
-        A_to_B = utils.generate_Ginput(img, pts, sigma=1, size=128)
+        A_to_B = utils.generate_Ginput(img, pts_2d, sigma=1, size=128)
 
-        return np.expand_dims(A_to_B,0)
+        return np.expand_dims(A_to_B,0), pts_3d
+
+    def _preprocess_opened_eyes_single(self, item):
+        img, pts_2d, pts_3d = item
+
+        pts_2d = utils.open_eyes_68(pts_2d)
+        pts_2d = utils.extract_66_from_68(pts_2d)
+
+        # img, pts = utils.crop_face_landmarks(img, pts)
+        # img, pts = utils.resize_face_landmarks(img, pts, (128, 128))
+
+        img = (img/255.).transpose(2,0,1).astype(float)
+
+        frame_w = int(np.floor(2*pts_2d.max()))
+        frame = np.zeros((frame_w,frame_w,3))
+        pts_2d, pts_3d = utils.reduced_crop(frame, pts_2d, pts_3d, size=128, tight=16)
+
+        A_to_B = utils.generate_Ginput(img, pts_2d, sigma=1, size=128)
+
+        return np.expand_dims(A_to_B,0), pts_3d
 
     @torch.no_grad()
-    def gen_close_eyes_batch(self, img_list, pts_list, batch_size=64):
+    def gen_close_eyes_batch(self, img_list, pts_list, out_dir='300VW-3D_cropped_closed_eyes', batch_size=64, closed_eyes=True):
+        os.makedirs(out_dir, exist_ok=True)
         bag = []
         
         logging.info('=> Load image and landmarks: ')
@@ -94,15 +114,31 @@ class GANnotation:
                 img = cv2.cvtColor(cv2.imread(img),cv2.COLOR_BGR2RGB)
             
             if isinstance(pts, str):
-                pts = utils.read_pts(pts)
+                pts_2d = utils.read_pts(pts)['pt2D']
+                pts_3d = utils.read_pts(pts)['pt3d']
 
-            bag.append((img, pts))
+            bag.append((img, pts_2d, pts_3d))
         
-        logging.info('=> Preprocess batch: ')
-        with mp.Pool(mp.cpu_count()) as p:
-            image_batch = list(tqdm.tqdm(p.imap(
-                    self._preprocess_single, bag
-                ), total=len(bag)))
+        # logging.info('=> Preprocess batch: ')
+        # with mp.Pool(mp.cpu_count()) as p:
+        #     data_batch = list(tqdm.tqdm(p.imap(
+        #             self._preprocess_closed_eyes_single, bag
+        #         ), total=len(bag)))
+        # image_batch = [data_batch[i][0] for i in range(len(data_batch))]
+        # pts_batch = [data_batch[i][1] for i in range(len(data_batch))]
+        # image_batch = np.concatenate(image_batch, 0)
+
+        logging.info('=> Preprocess sequential: ')
+        data_batch = []
+        if closed_eyes:
+            for idx in tqdm.tqdm(range(len(bag)), total=len(bag)):
+                data_batch.append(self._preprocess_closed_eyes_single(bag[idx]))
+        else:
+            for idx in tqdm.tqdm(range(len(bag)), total=len(bag)):
+                data_batch.append(self._preprocess_opened_eyes_single(bag[idx]))
+
+        image_batch = [data_batch[i][0] for i in range(len(data_batch))]
+        pts_batch = [data_batch[i][1] for i in range(len(data_batch))]
         image_batch = np.concatenate(image_batch, 0)
 
         if self.enable_cuda:
@@ -130,9 +166,39 @@ class GANnotation:
         all_result = (255*np.array(all_result)).astype('uint8')
         all_result = np.ascontiguousarray(all_result, dtype=np.uint8)
 
-        return all_result
+        print('=> Saving image: ')
+        for idx in tqdm.tqdm(range(len(all_result)), total=len(all_result)):
+            folder_id = img_list[idx].split('/')[-2]
+            img_name = img_list[idx].split('/')[-1]
+            os.makedirs(os.path.join(out_dir, folder_id), exist_ok=True)
+            new_image = all_result[idx]
+            new_image = cv2.cvtColor(new_image, cv2.COLOR_BGR2RGB)
 
-        
+            # pts = utils.read_pts(pts_list[idx])['pt3d']
+            pts = pts_batch[idx]
+
+            if closed_eyes:
+                new_pts = utils.close_eyes_68(pts)
+            else:
+                new_pts = utils.open_eyes_68(pts)
+
+            image_save_path = os.path.join(out_dir, folder_id, img_name)
+            cv2.imwrite(image_save_path, new_image)
+
+            # pts_save_path = os.path.join(out_dir, folder_id, img_name.replace('jpg', 'mat'))
+            # sio.savemat(pts_save_path, {'pt3d': new_pts})
+            
+            # box_left = int(np.ceil(np.min(pts.T[0])))
+            # box_right = int(np.ceil(np.max(pts.T[0])))
+            # box_top = int(np.ceil(np.min(pts.T[1])))
+            # box_bot = int(np.ceil(np.max(pts.T[1])))
+            # print([int(np.ceil((box_left+box_right)/2)), int(np.ceil((box_top+box_bot)/2))])
+            for i in range(new_pts.shape[0]):
+                _pts = new_pts[i].astype(int)
+                _img = cv2.circle(new_image, (_pts[0], _pts[1]),2,(0,255,0), -1, 5)
+            
+            cv2.imwrite(f'test_images/{img_name}', _img)
+
 
 
 
